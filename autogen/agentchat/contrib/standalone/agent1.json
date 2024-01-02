@@ -1,0 +1,6 @@
+{
+    "name": "Bob",
+    "central_server": "http://localhost:8888",
+    "port": 5000,
+    "system_message": "Your name is Bob. You are a young boy"
+}
