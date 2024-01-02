@@ -5,13 +5,36 @@ import inspect
 import json
 import logging
 from collections import defaultdict
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Type, TypeVar, Union
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+)
 
 from .. import OpenAIWrapper
-from ..code_utils import DEFAULT_MODEL, UNKNOWN, content_str, execute_code, extract_code, infer_lang
-from ..function_utils import get_function_schema, load_basemodels_if_needed, serialize_to_str
-from .agent import Agent
 from .._pydantic import model_dump
+from ..code_utils import (
+    DEFAULT_MODEL,
+    UNKNOWN,
+    content_str,
+    execute_code,
+    extract_code,
+    infer_lang,
+)
+from ..function_utils import (
+    get_function_schema,
+    load_basemodels_if_needed,
+    serialize_to_str,
+)
+from .agent import Agent
 
 try:
     from termcolor import colored
@@ -627,6 +650,7 @@ class ConversableAgent(Agent):
         config: Optional[OpenAIWrapper] = None,
     ) -> Tuple[bool, Union[str, Dict, None]]:
         """Generate a reply using autogen.oai."""
+        print(colored(f"generate_oai_reply", "blue"), flush=True)
         client = self.client if config is None else config
         if client is None:
             return False, None
@@ -634,9 +658,16 @@ class ConversableAgent(Agent):
             messages = self._oai_messages[sender]
 
         # TODO: #1143 handle token limit exceeded error
-        response = client.create(
-            context=messages[-1].pop("context", None), messages=self._oai_system_message + messages
+        ctx = messages[-1].pop("context", None)
+        msg = self._oai_system_message + messages
+        print(
+            colored(
+                f"{self.name} is using OAI, based on:\n-Context: {ctx}\n-Messages: {json.dumps(msg, indent=4)}",
+                "yellow",
+            ),
+            flush=True,
         )
+        response = client.create(context=ctx, messages=msg)
 
         # TODO: line 301, line 271 is converting messages to dict. Can be removed after ChatCompletionMessage_to_dict is merged.
         extracted_response = client.extract_text_or_completion_object(response)[0]
@@ -662,6 +693,7 @@ class ConversableAgent(Agent):
         config: Optional[Union[Dict, Literal[False]]] = None,
     ):
         """Generate a reply using code execution."""
+        print(colored(f"generate_code_execution_reply", "blue"), flush=True)
         code_execution_config = config if config is not None else self._code_execution_config
         if code_execution_config is False:
             return False, None
@@ -711,6 +743,7 @@ class ConversableAgent(Agent):
         config: Optional[Any] = None,
     ) -> Tuple[bool, Union[Dict, None]]:
         """Generate a reply using function call."""
+        print(colored(f"generate_function_call_reply", "blue"), flush=True)
         if config is None:
             config = self
         if messages is None:
@@ -767,7 +800,7 @@ class ConversableAgent(Agent):
             should be terminated, and a human reply which can be a string, a dictionary, or None.
         """
         # Function implementation...
-
+        print(colored(f"check_termination_and_human_reply", "blue"), flush=True)
         if config is None:
             config = self
         if messages is None:

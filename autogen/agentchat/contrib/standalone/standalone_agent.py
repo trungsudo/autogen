@@ -5,6 +5,7 @@ import functools
 import json
 import logging
 import signal
+import socket
 import sys
 import threading
 import time
@@ -34,16 +35,22 @@ class Message(BaseModel):
 
 class StandAloneAgent(ConversableAgent):
     def __init__(self, agent_config: Optional[Dict] = None, *args, **kwargs):
+        if "port" not in agent_config or "central_server" not in agent_config:
+            raise Exception("config is not contains port/central_server")
         self._port = int(agent_config.get("port", 1234))
         self.central_server = agent_config["central_server"]
+        self._host = agent_config["host"] if "host" in agent_config else socket.gethostbyname(socket.gethostname())
         agent_config.pop("port")
         agent_config.pop("central_server")
+        if "host" in agent_config:
+            agent_config.pop("host")
+
         super().__init__(*args, **agent_config, **kwargs)
 
         self._register_agent()
 
         self.app = Flask(__name__)
-        self.server = make_server("localhost", self._port, self.app)
+        self.server = make_server(self._host, self._port, self.app)
 
         @self.app.route("/message", methods=["POST"])
         def receive_http_message():
@@ -71,8 +78,9 @@ class StandAloneAgent(ConversableAgent):
         return status
 
     def _register_agent(self):
-        # TODO get host
-        message = AgentInfo(name=self._name, description=self.system_message, endpoint=f"http://localhost:{self._port}")
+        message = AgentInfo(
+            name=self._name, description=self.system_message, endpoint=f"http://{self._host}:{self._port}"
+        )
         response = requests.post(self.central_server + "/register", json=message.model_dump())
         if response.status_code != 200:
             raise Exception(response.content)
@@ -81,6 +89,7 @@ class StandAloneAgent(ConversableAgent):
         requests.post(self.central_server + "/self_unregister", json={"name": self._name})
 
     def serve(self):
+        print(colored(f"{self._name} is ONLINE at {self._host}:{self._port}", "green"))
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.start()
 
@@ -89,6 +98,7 @@ class StandAloneAgent(ConversableAgent):
             response = self._self_unregister()
         except Exception as error:
             print(error)
+        print(colored(f"{self._name} is OFFLINE", "red"))
         self.server.shutdown()
         self.thread.join()
 
@@ -158,6 +168,8 @@ class StandAloneAgent(ConversableAgent):
                 print(e)
                 return
             self.send(message=reply, recipient=sender, request_reply=True, silent=silent)
+        else:
+            print(colored(f"{self.name} has nothing to tell with {sender.name}", "red"), flush=True)
 
     async def a_receive(
         self,
@@ -253,15 +265,22 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     args = parse_args()
     config = load_config(args.config)
-    config_list = config_list_from_json("../OAI_CONFIG_LIST", filter_dict={"model": ["llama-v2"]})
-
+    config_list = config_list_from_json("../../../../OAI_CONFIG_LIST", filter_dict={"model": ["llama-v2"]})
+    config_list_gpt = config_list_from_json(
+        "../../../../OAI_CONFIG_LIST", filter_dict={"model": ["gpt-3.5-turbo-1106"]}
+    )
     llm_config = {
         "timeout": 600,
         "cache_seed": 42,
         "config_list": config_list,
     }
 
-    agent = StandAloneAgent(agent_config=config, llm_config=llm_config)
+    agent = StandAloneAgent(
+        agent_config=config,
+        is_termination_msg=lambda x: x.get("content", "").rstrip().endswith("TERMINATE"),
+        llm_config=llm_config,
+        human_input_mode="NEVER",
+    )
     agent.serve()
     if config["name"] == "Bob":
         receiver = Agent("Anna")

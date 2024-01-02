@@ -1,7 +1,6 @@
-import uuid
 from enum import Enum
 
-from flask import Flask, jsonify, request
+from flask import Flask, request
 from pydantic import BaseModel, Field
 
 
