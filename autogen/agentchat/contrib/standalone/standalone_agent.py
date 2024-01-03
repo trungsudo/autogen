@@ -41,16 +41,16 @@ class Message(BaseModel):
     sender_name: str
     receiver_name: str
     message: Union[Dict, str]
-    request_reply: bool = False
-    silent: bool = False
+    request_reply:  Optional[bool] = False
+    silent: Optional[bool] = False
 
 
 class StandAloneAgent(ConversableAgent):
-    def __init__(self, agent_config: Optional[Dict] = None, *args, **kwargs):
+    def __init__(self, *args, agent_config: Optional[Dict] = None, **kwargs):
         if "port" not in agent_config or "central_server" not in agent_config:
             raise Exception("config is not contains port/central_server")
         self._port = int(agent_config.get("port", 1234))
-        self.central_server = agent_config["central_server"]
+        self._central_server = agent_config["central_server"]
         self._host = agent_config["host"] if "host" in agent_config else socket.gethostbyname(socket.gethostname())
         agent_config.pop("port")
         agent_config.pop("central_server")
@@ -58,8 +58,12 @@ class StandAloneAgent(ConversableAgent):
             agent_config.pop("host")
 
         super().__init__(*args, **agent_config, **kwargs)
-
+        # TODO: expiration
+        self._cache_agentinfo = {}
         self._register_agent()
+
+        # Re-register all the reply funcs
+        self._reply_func_list = []
         self.register_reply([Agent, None], StandAloneAgent.generate_oai_reply)
         self.register_reply([Agent, None], StandAloneAgent.a_generate_oai_reply)
         self.register_reply([Agent, None], StandAloneAgent.generate_code_execution_reply)
@@ -83,27 +87,39 @@ class StandAloneAgent(ConversableAgent):
         def handle_request_reset_consecutive_auto_reply_counter():
             """Reset the consecutive_auto_reply_counter of the sender HTTP handler."""
             data = request.get_json(force=True)
-            self.reset_consecutive_auto_reply_counter(data.get("name"))
+            self.reset_consecutive_auto_reply_counter(data if data is None or data["name"] is None else Agent(data["name"]))
+            return "Request received", 200
 
         @self.app.route("/request_reply_at_receive", methods=["POST"])
         def handle_request_reply_at_receive():
             data = request.get_json(force=True)
             if data is not None and data["name"] is not None and data["request_reply"] is not None:
                 self.reply_at_receive[data["name"]] = data["request_reply"]
-                print(f"reply_at_receive[{data['name']}]: {self.reply_at_receive[data['name']]}")
+            return "Request received", 200
+        
+        @self.app.route("/request_clear_history", methods=["POST"])
+        def handle_request_clear_history():
+            data = request.get_json(force=True)
+            self.clear_history(data if data is None or data["name"] is None else Agent(data["name"]))
+            return "Request received", 200
+        
+    def request_clear_history(self, recipient: Agent):
+        destination = self.get_agentinfo_from_name(recipient._name).endpoint + "/request_clear_history"
+        headers = {"Content-Type": "application/json"}
+        requests.post(destination, headers=headers, json={"name": self.name})
 
     def request_reply_at_receive(self, recipient: Agent, request_reply: bool):
-        destination = self.get_agentinfo_from_name(recipient.name).endpoint + "/request_reply_at_receive"
+        destination = self.get_agentinfo_from_name(recipient._name).endpoint + "/request_reply_at_receive"
         headers = {"Content-Type": "application/json"}
-        requests.post(destination, headers=headers, json={"name": {self.name}, "request_reply": request_reply})
+        requests.post(destination, headers=headers, json={"name": self.name, "request_reply": request_reply})
 
     def request_reset_consecutive_auto_reply_counter(self, recipient: Agent):
         """Send request to reset the consecutive_auto_reply_counter of the receiver with sender"""
         destination = (
-            self.get_agentinfo_from_name(recipient.name).endpoint + "/request_reset_consecutive_auto_reply_counter"
+            self.get_agentinfo_from_name(recipient._name).endpoint + "/request_reset_consecutive_auto_reply_counter"
         )
         headers = {"Content-Type": "application/json"}
-        requests.post(destination, headers=headers, json=f'{"name": {self.name}}')
+        requests.post(destination, headers=headers, json={"name": self._name})
 
     def handler(self, message: Message):
         self.receive(
@@ -114,24 +130,28 @@ class StandAloneAgent(ConversableAgent):
         )
 
     def get_agentinfo_from_name(self, agent_name: str) -> AgentInfo:
+        if agent_name in self._cache_agentinfo:
+            return self._cache_agentinfo[agent_name]
+
         params = {"name": agent_name}
-        response = requests.get(self.central_server + "/agent", params=params)
+        response = requests.get(self._central_server + "/agent", params=params)
 
         if response.status_code != 200:
             raise Exception(response.json()["error"])
-        status = AgentInfo(**response.json())
-        return status
+        info = AgentInfo(**response.json())
+        self._cache_agentinfo[agent_name] = info
+        return info
 
     def _register_agent(self):
         message = AgentInfo(
             name=self._name, description=self.system_message, endpoint=f"http://{self._host}:{self._port}"
         )
-        response = requests.post(self.central_server + "/register", json=message.model_dump())
+        response = requests.post(self._central_server + "/register", json=message.model_dump())
         if response.status_code != 200:
             raise Exception(response.content)
 
     def _self_unregister(self):
-        requests.post(self.central_server + "/self_unregister", json={"name": self._name})
+        requests.post(self._central_server + "/self_unregister", json={"name": self._name})
 
     def serve(self):
         print(colored(f"{self._name} is ONLINE at {self._host}:{self._port}", "green"))
@@ -181,12 +201,12 @@ class StandAloneAgent(ConversableAgent):
             for k in self._max_consecutive_auto_reply_dict:
                 self._max_consecutive_auto_reply_dict[k] = value
         else:
-            self._max_consecutive_auto_reply_dict[sender.name] = value
+            self._max_consecutive_auto_reply_dict[sender._name] = value
 
     def max_consecutive_auto_reply(self, sender: Optional[Agent] = None) -> int:
         """The maximum number of consecutive auto replies."""
         return (
-            self._max_consecutive_auto_reply if sender is None else self._max_consecutive_auto_reply_dict[sender.name]
+            self._max_consecutive_auto_reply if sender is None else self._max_consecutive_auto_reply_dict[sender._name]
         )
 
     # Broken: def chat_messages(self) -> Dict[Agent, List[Dict]]
@@ -214,11 +234,11 @@ class StandAloneAgent(ConversableAgent):
                 for conversation in self._oai_messages.values():
                     return conversation[-1]
             raise ValueError("More than one conversation is found. Please specify the sender to get the last message.")
-        if agent.name not in self._oai_messages.keys():
+        if agent._name not in self._oai_messages.keys():
             raise KeyError(
-                f"The agent '{agent.name}' is not present in any conversation. No history available for this agent."
+                f"The agent '{agent._name}' is not present in any conversation. No history available for this agent."
             )
-        return self._oai_messages[agent.name][-1]
+        return self._oai_messages[agent._name][-1]
 
     # def use_docker(self) -> Union[bool, str, None]
 
@@ -253,7 +273,7 @@ class StandAloneAgent(ConversableAgent):
         if "function_call" in oai_message:
             oai_message["role"] = "assistant"  # only messages with role 'assistant' can have a function call.
             oai_message["function_call"] = dict(oai_message["function_call"])
-        self._oai_messages[conversation_id.name].append(oai_message)
+        self._oai_messages[conversation_id._name].append(oai_message)
         return True
 
     def send(
@@ -301,18 +321,18 @@ class StandAloneAgent(ConversableAgent):
         if valid:
             # recipient.receive(message, self, request_reply, silent)
             try:
-                target_url = self.get_agentinfo_from_name(recipient.name).endpoint + "/message"
+                target_url = self.get_agentinfo_from_name(recipient._name).endpoint + "/message"
+                http_message = Message(
+                    sender_name=self._name,
+                    receiver_name=recipient._name,
+                    message=message,
+                    request_reply=request_reply,
+                    silent=silent,
+                )
+                print(colored(f"{self.name} -> {recipient._name}: {message}", "light_red"), flush=True)
+                self.send_http_message(http_message, target_url)
             except Exception as e:
                 raise e
-            http_message = Message(
-                sender_name=self._name,
-                receiver_name=recipient.name,
-                message=message,
-                request_reply=request_reply,
-                silent=silent,
-            )
-            print(colored(f"{self.name} -> {recipient.name}: {message}", "light_red"), flush=True)
-            self.send_http_message(http_message, target_url)
         else:
             raise ValueError(
                 "Message can't be converted into a valid ChatCompletion message. Either content or function_call must be provided."
@@ -396,21 +416,20 @@ class StandAloneAgent(ConversableAgent):
             ValueError: if the message can't be converted into a valid ChatCompletion message.
         """
         self._process_received_message(message, sender, silent)
-        if request_reply is False or request_reply is None and self.reply_at_receive[sender.name] is False:
-            print(colored(f"{self.name} is not gonna reply to {sender.name}", "red"), flush=True)
+        if request_reply is False or request_reply is None and self.reply_at_receive[sender._name] is False:
+            print(colored(f"{self.name} is not gonna reply to {sender._name}", "red"), flush=True)
             return
 
-        reply = self.generate_reply(messages=self.chat_messages[sender], sender=sender)
+        reply = self.generate_reply(messages=self.chat_messages[sender._name], sender=sender)
         if reply is not None:
-            # self.send(reply, sender, silent=silent)
             try:
-                target_url = self.get_agentinfo_from_name(sender.name).endpoint
+                target_url = self.get_agentinfo_from_name(sender._name).endpoint
             except Exception as e:
                 print(e)
                 return
             self.send(message=reply, recipient=sender, request_reply=True, silent=silent)
         else:
-            print(colored(f"{self.name} has nothing to tell with {sender.name}", "red"), flush=True)
+            print(colored(f"{self.name} has nothing to tell with {sender._name}", "red"), flush=True)
 
     async def a_receive(
         self,
@@ -425,15 +444,15 @@ class StandAloneAgent(ConversableAgent):
         self.receive(message, sender, request_reply, silent)
 
     def _prepare_chat(self, recipient, clear_history):
-        self.reset_consecutive_auto_reply_counter(recipient.name)
+        self.reset_consecutive_auto_reply_counter(recipient)
         self.request_reset_consecutive_auto_reply_counter(recipient)
 
-        self.reply_at_receive[recipient.name] = True
+        self.reply_at_receive[recipient._name] = True
         self.request_reply_at_receive(recipient, True)
 
         if clear_history:
             self.clear_history(recipient)
-            recipient.clear_history(self)
+            self.request_clear_history(recipient)
 
     def initiate_chat(
         self,
@@ -497,14 +516,14 @@ class StandAloneAgent(ConversableAgent):
         if sender is None:
             self.reply_at_receive.clear()
         else:
-            self.reply_at_receive[sender.name] = False
+            self.reply_at_receive[sender._name] = False
 
-    def reset_consecutive_auto_reply_counter(self, name: str):
+    def reset_consecutive_auto_reply_counter(self, sender: Optional[Agent] = None):
         """Reset the consecutive_auto_reply_counter of the sender."""
-        if name is not None:
-            self._consecutive_auto_reply_counter[name] = 0
-        else:
+        if sender is None:
             self._consecutive_auto_reply_counter.clear()
+        else:
+            self._consecutive_auto_reply_counter[sender._name] = 0
 
     def clear_history(self, agent: Optional[Agent] = None):
         """Clear the chat history of the agent.
@@ -515,7 +534,7 @@ class StandAloneAgent(ConversableAgent):
         if agent is None:
             self._oai_messages.clear()
         else:
-            self._oai_messages[agent.name].clear()
+            self._oai_messages[agent._name].clear()
 
     def generate_oai_reply(
         self,
@@ -528,7 +547,7 @@ class StandAloneAgent(ConversableAgent):
         if client is None:
             return False, None
         if messages is None or len(messages) == 0:
-            messages = self._oai_messages[sender.name]
+            messages = self._oai_messages[sender._name]
 
         # TODO: #1143 handle token limit exceeded error
         ctx = messages[-1].pop("context", None)
@@ -571,7 +590,7 @@ class StandAloneAgent(ConversableAgent):
         if code_execution_config is False:
             return False, None
         if messages is None:
-            messages = self._oai_messages[sender.name]
+            messages = self._oai_messages[sender._name]
         last_n_messages = code_execution_config.pop("last_n_messages", 1)
 
         messages_to_scan = last_n_messages
@@ -620,7 +639,7 @@ class StandAloneAgent(ConversableAgent):
         if config is None:
             config = self
         if messages is None or len(messages) == 0:
-            messages = self._oai_messages[sender.name]
+            messages = self._oai_messages[sender._name]
         message = messages[-1]
         if "function_call" in message:
             _, func_return = self.execute_function(message["function_call"])
@@ -637,7 +656,7 @@ class StandAloneAgent(ConversableAgent):
         if config is None:
             config = self
         if messages is None or len(messages) == 0:
-            messages = self._oai_messages[sender.name]
+            messages = self._oai_messages[sender._name]
         message = messages[-1]
         if "function_call" in message:
             func_call = message["function_call"]
@@ -677,28 +696,28 @@ class StandAloneAgent(ConversableAgent):
         if config is None:
             config = self
         if messages is None or len(messages) == 0:
-            messages = self._oai_messages[sender.name]
+            messages = self._oai_messages[sender._name]
         message = messages[-1]
         reply = ""
         no_human_input_msg = ""
         if self.human_input_mode == "ALWAYS":
             reply = self.get_human_input(
-                f"Provide feedback to {sender.name}. Press enter to skip and use auto-reply, or type 'exit' to end the conversation: "
+                f"Provide feedback to {sender._name}. Press enter to skip and use auto-reply, or type 'exit' to end the conversation: "
             )
             no_human_input_msg = "NO HUMAN INPUT RECEIVED." if not reply else ""
             # if the human input is empty, and the message is a termination message, then we will terminate the conversation
             reply = reply if reply or not self._is_termination_msg(message) else "exit"
         else:
-            if self._consecutive_auto_reply_counter[sender.name] >= self._max_consecutive_auto_reply_dict[sender.name]:
+            if self._consecutive_auto_reply_counter[sender._name] >= self._max_consecutive_auto_reply_dict[sender._name]:
                 if self.human_input_mode == "NEVER":
                     reply = "exit"
                 else:
                     # self.human_input_mode == "TERMINATE":
                     terminate = self._is_termination_msg(message)
                     reply = self.get_human_input(
-                        f"Please give feedback to {sender.name}. Press enter or type 'exit' to stop the conversation: "
+                        f"Please give feedback to {sender._name}. Press enter or type 'exit' to stop the conversation: "
                         if terminate
-                        else f"Please give feedback to {sender.name}. Press enter to skip and use auto-reply, or type 'exit' to stop the conversation: "
+                        else f"Please give feedback to {sender._name}. Press enter to skip and use auto-reply, or type 'exit' to stop the conversation: "
                     )
                     no_human_input_msg = "NO HUMAN INPUT RECEIVED." if not reply else ""
                     # if the human input is empty, and the message is a termination message, then we will terminate the conversation
@@ -709,7 +728,7 @@ class StandAloneAgent(ConversableAgent):
                 else:
                     # self.human_input_mode == "TERMINATE":
                     reply = self.get_human_input(
-                        f"Please give feedback to {sender.name}. Press enter or type 'exit' to stop the conversation: "
+                        f"Please give feedback to {sender._name}. Press enter or type 'exit' to stop the conversation: "
                     )
                     no_human_input_msg = "NO HUMAN INPUT RECEIVED." if not reply else ""
                     # if the human input is empty, and the message is a termination message, then we will terminate the conversation
@@ -722,17 +741,17 @@ class StandAloneAgent(ConversableAgent):
         # stop the conversation
         if reply == "exit":
             # reset the consecutive_auto_reply_counter
-            self._consecutive_auto_reply_counter[sender.name] = 0
+            self._consecutive_auto_reply_counter[sender._name] = 0
             return True, None
 
         # send the human reply
-        if reply or self._max_consecutive_auto_reply_dict[sender.name] == 0:
+        if reply or self._max_consecutive_auto_reply_dict[sender._name] == 0:
             # reset the consecutive_auto_reply_counter
-            self._consecutive_auto_reply_counter[sender.name] = 0
+            self._consecutive_auto_reply_counter[sender._name] = 0
             return True, reply
 
         # increment the consecutive_auto_reply_counter
-        self._consecutive_auto_reply_counter[sender.name] += 1
+        self._consecutive_auto_reply_counter[sender._name] += 1
         if self.human_input_mode != "NEVER":
             print(colored("\n>>>>>>>> USING AUTO REPLY...", "red"), flush=True)
 
@@ -764,28 +783,28 @@ class StandAloneAgent(ConversableAgent):
         if config is None:
             config = self
         if messages is None or len(messages) == 0:
-            messages = self._oai_messages[sender.name]
+            messages = self._oai_messages[sender._name]
         message = messages[-1]
         reply = ""
         no_human_input_msg = ""
         if self.human_input_mode == "ALWAYS":
             reply = await self.a_get_human_input(
-                f"Provide feedback to {sender.name}. Press enter to skip and use auto-reply, or type 'exit' to end the conversation: "
+                f"Provide feedback to {sender._name}. Press enter to skip and use auto-reply, or type 'exit' to end the conversation: "
             )
             no_human_input_msg = "NO HUMAN INPUT RECEIVED." if not reply else ""
             # if the human input is empty, and the message is a termination message, then we will terminate the conversation
             reply = reply if reply or not self._is_termination_msg(message) else "exit"
         else:
-            if self._consecutive_auto_reply_counter[sender.name] >= self._max_consecutive_auto_reply_dict[sender.name]:
+            if self._consecutive_auto_reply_counter[sender._name] >= self._max_consecutive_auto_reply_dict[sender._name]:
                 if self.human_input_mode == "NEVER":
                     reply = "exit"
                 else:
                     # self.human_input_mode == "TERMINATE":
                     terminate = self._is_termination_msg(message)
                     reply = await self.a_get_human_input(
-                        f"Please give feedback to {sender.name}. Press enter or type 'exit' to stop the conversation: "
+                        f"Please give feedback to {sender._name}. Press enter or type 'exit' to stop the conversation: "
                         if terminate
-                        else f"Please give feedback to {sender.name}. Press enter to skip and use auto-reply, or type 'exit' to stop the conversation: "
+                        else f"Please give feedback to {sender._name}. Press enter to skip and use auto-reply, or type 'exit' to stop the conversation: "
                     )
                     no_human_input_msg = "NO HUMAN INPUT RECEIVED." if not reply else ""
                     # if the human input is empty, and the message is a termination message, then we will terminate the conversation
@@ -796,7 +815,7 @@ class StandAloneAgent(ConversableAgent):
                 else:
                     # self.human_input_mode == "TERMINATE":
                     reply = await self.a_get_human_input(
-                        f"Please give feedback to {sender.name}. Press enter or type 'exit' to stop the conversation: "
+                        f"Please give feedback to {sender._name}. Press enter or type 'exit' to stop the conversation: "
                     )
                     no_human_input_msg = "NO HUMAN INPUT RECEIVED." if not reply else ""
                     # if the human input is empty, and the message is a termination message, then we will terminate the conversation
@@ -809,17 +828,17 @@ class StandAloneAgent(ConversableAgent):
         # stop the conversation
         if reply == "exit":
             # reset the consecutive_auto_reply_counter
-            self._consecutive_auto_reply_counter[sender.name] = 0
+            self._consecutive_auto_reply_counter[sender._name] = 0
             return True, None
 
         # send the human reply
-        if reply or self._max_consecutive_auto_reply_dict[sender.name] == 0:
+        if reply or self._max_consecutive_auto_reply_dict[sender._name] == 0:
             # reset the consecutive_auto_reply_counter
-            self._consecutive_auto_reply_counter[sender.name] = 0
+            self._consecutive_auto_reply_counter[sender._name] = 0
             return True, reply
 
         # increment the consecutive_auto_reply_counter
-        self._consecutive_auto_reply_counter[sender.name] += 1
+        self._consecutive_auto_reply_counter[sender._name] += 1
         if self.human_input_mode != "NEVER":
             print(colored("\n>>>>>>>> USING AUTO REPLY...", "red"), flush=True)
 
@@ -856,14 +875,14 @@ class StandAloneAgent(ConversableAgent):
         Returns:
             str or dict or None: reply. None if no reply is generated.
         """
-        print(colored(f"{self.name} generate_reply", "blue"), flush=True)
+        print(colored(f"{self._name} generate_reply", "blue"), flush=True)
         if all((messages is None, sender is None)):
             error_msg = f"Either {messages=} or {sender=} must be provided."
             logger.error(error_msg)
             raise AssertionError(error_msg)
 
         if messages is None:
-            messages = self._oai_messages[sender.name]
+            messages = self._oai_messages[sender._name]
 
         for reply_func_tuple in self._reply_func_list:
             reply_func = reply_func_tuple["reply_func"]
@@ -914,7 +933,7 @@ class StandAloneAgent(ConversableAgent):
             raise AssertionError(error_msg)
 
         if messages is None:
-            messages = self._oai_messages[sender.name]
+            messages = self._oai_messages[sender._name]
 
         for reply_func_tuple in self._reply_func_list:
             reply_func = reply_func_tuple["reply_func"]
@@ -949,7 +968,7 @@ class StandAloneAgent(ConversableAgent):
         if trigger is None:
             return sender is None
         elif isinstance(trigger, str):
-            return trigger == sender.name
+            return trigger == sender._name
         elif isinstance(trigger, type):
             return isinstance(sender, trigger)
         elif isinstance(trigger, Agent):
@@ -994,6 +1013,16 @@ class StandAloneAgent(ConversableAgent):
 
     # def register_for_execution
 
+    def signal_handler(self, sig, frame):
+        print("Terminating agent")
+        self.stop()
+        sys.exit(0)
+
+    def wait(self):
+        signal.signal(signal.SIGINT, self.signal_handler)
+        while True:
+            time.sleep(2)
+        # self.thread.join()
 
 def load_config(file_path):
     with open(file_path, "r") as f:
@@ -1006,15 +1035,8 @@ def parse_args():
     parser.add_argument("--config", type=str, required=True, help="Path to the configuration file")
     return parser.parse_args()
 
-
-def signal_handler(sig, frame):
-    print("Terminating agent")
-    agent.stop()
-    sys.exit(0)
-
-
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, signal_handler)
+    
     args = parse_args()
     config = load_config(args.config)
 
@@ -1038,5 +1060,5 @@ if __name__ == "__main__":
     if config["name"] == "Bob":
         receiver = Agent("Anna")
         agent.send(message=f"Hello beautiful girl!", recipient=receiver, request_reply=True)
-    while True:
-        time.sleep(1)
+    agent.wait()
+    
