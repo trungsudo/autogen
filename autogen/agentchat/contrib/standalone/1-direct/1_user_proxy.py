@@ -1,7 +1,6 @@
 import os
 
-from standalone_assistant_agent import StandAloneAssistantAgent
-from standalone_user_proxy_agent import StandAloneUserProxyAgent
+from standalone import StandAloneUserProxyAgent
 
 import autogen
 from autogen import ConversableAgent
@@ -35,23 +34,22 @@ user_proxy = StandAloneUserProxyAgent(
     },
 )
 
-user_proxy.register_function(function_map=function_map)
+try:
+    user_proxy.register_function(function_map=function_map)
+    user_proxy.serve()
+    user_proxy.initiate_chat(
+        recipient="Developer",
+        clear_history=True,
+        message="""create a battleship classic game""",
+    )
 
-user_proxy.serve()
+    user_proxy.initiate_chat(
+        recipient_name="Developer",
+        clear_history=True,
+        message="""Plot a chart of their stock price change YTD and save to stock_price_ytd.png.""",
+    )
 
-# the assistant receives a message from the user_proxy, which contains the task description
-user_proxy.initiate_chat(
-    recipient="Developer",
-    clear_history=True,
-    message="""create a battleship classic game""",
-)
-
-# print(">>>>>>>>>>>>>>> Second request")
-
-# user_proxy.initiate_chat(
-#     recipient_name="Developer",
-#     clear_history=True,
-#     message="""Plot a chart of their stock price change YTD and save to stock_price_ytd.png.""",
-# )
-
-user_proxy.wait()
+    user_proxy.wait()
+except Exception as error:
+    print(error)
+    user_proxy.stop()

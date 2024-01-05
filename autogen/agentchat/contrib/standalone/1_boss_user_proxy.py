@@ -3,6 +3,7 @@ import time
 
 from standalone_assistant_agent import StandAloneAssistantAgent
 from standalone_user_proxy_agent import StandAloneUserProxyAgent
+from termcolor import colored
 
 import autogen
 from autogen import ConversableAgent
@@ -21,9 +22,9 @@ function_map = {"get_resource": get_resource}
 # create a UserProxyAgent instance named "user_proxy"
 user_proxy = StandAloneUserProxyAgent(
     name="Boss",
-    human_input_mode="NEVER",
+    human_input_mode="TERMINATE",
     max_consecutive_auto_reply=12,
-    # is_termination_msg=lambda x: x.get("content", "").rstrip().endswith("TERMINATE"),
+    is_termination_msg=lambda x: x.get("content", "").rstrip().endswith("TERMINATE"),
     code_execution_config={
         "work_dir": "coding",
         "use_docker": False,
@@ -37,24 +38,17 @@ user_proxy = StandAloneUserProxyAgent(
 )
 
 user_proxy.register_function(function_map=function_map)
+try:
+    user_proxy.serve()
+    # TODO: Get notification from server
+    user_proxy.wait_for_agent("ChatManager")
 
-user_proxy.serve()
-
-user_proxy.wait_for_agent("ChatManager")
-
-# the assistant receives a message from the user_proxy, which contains the task description
-user_proxy.initiate_chat(
-    recipient="Developer",
-    clear_history=True,
-    message="""create a battleship classic game""",
-)
-
-# print(">>>>>>>>>>>>>>> Second request")
-
-# user_proxy.initiate_chat(
-#     recipient_name="Developer",
-#     clear_history=True,
-#     message="""Plot a chart of their stock price change YTD and save to stock_price_ytd.png.""",
-# )
-
-user_proxy.wait()
+    user_proxy.initiate_chat(
+        recipient="ChatManager",
+        clear_history=True,
+        message="""create a battleship classic game""",
+    )
+    user_proxy.wait()
+except Exception as error:
+    print(colored(error, "red"), flush=True)
+    user_proxy.stop()

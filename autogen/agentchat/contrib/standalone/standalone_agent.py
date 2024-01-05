@@ -25,16 +25,19 @@ from typing import (
 
 import requests
 from central_server import AgentInfo, RunningState
-from flask import Flask, request
+from flask import Flask, jsonify, request
 from pydantic import BaseModel
 from termcolor import colored
 from werkzeug.serving import make_server
 
 from autogen import Agent, ConversableAgent, config_list_from_json
+from autogen._pydantic import model_dump
 from autogen.code_utils import UNKNOWN, extract_code
 from autogen.oai import OpenAIWrapper
 
 logger = logging.getLogger(__name__)
+
+logger.setLevel(logging.INFO)
 
 
 class Message(BaseModel):
@@ -84,10 +87,10 @@ class StandAloneAgent(ConversableAgent):
         @self.app.route("/message", methods=["POST"])
         def receive_http_message():
             message = Message(**request.get_json())
-            print(colored(f"{message.sender_name} -> {self.name}: {message.message}", "green"), flush=True)
+            logger.debug(colored(f"{message.sender_name} -> {self.name}: {message.message}", "green"))
             thread = threading.Thread(target=self.handler, args=(message,))
             thread.start()
-            return "Message received", 200
+            return jsonify("Message received"), 200
 
         @self.app.route("/request_reset_consecutive_auto_reply_counter", methods=["POST"])
         def handle_request_reset_consecutive_auto_reply_counter():
@@ -96,43 +99,52 @@ class StandAloneAgent(ConversableAgent):
             self.reset_consecutive_auto_reply_counter(
                 data if data is None or data["name"] is None else Agent(data["name"])
             )
-            return "Request received", 200
+            return jsonify("Request received"), 200
 
         @self.app.route("/request_reply_at_receive", methods=["POST"])
         def handle_request_reply_at_receive():
             data = request.get_json(force=True)
             if data is not None and data["name"] is not None and data["request_reply"] is not None:
                 self.reply_at_receive[data["name"]] = data["request_reply"]
-            return "Request received", 200
+            return jsonify("Request received"), 200
 
         @self.app.route("/request_clear_history", methods=["POST"])
         def handle_request_clear_history():
             data = request.get_json(force=True)
             self.clear_history(data if data is None or data["name"] is None else Agent(data["name"]))
-            return "Request received", 200
+            return jsonify("request received"), 200
+
+        @self.app.route("/request_generate_reply", methods=["POST"])
+        def handle_request_generate_reply():
+            data = request.get_json(force=True)
+            if data is None or "reply_to" not in data:
+                return jsonify("bad request"), 400
+            reply = self.generate_reply(sender=Agent(data["reply_to"]))
+            return jsonify(reply), 200
 
     def request_clear_history(self, recipient: Agent):
         info = self.get_agentinfo_from_name(recipient._name)
         if info.status != RunningState.ONLINE:
             print(colored(f"{recipient._name} is NOT ONLINE"))
             return
-        destination = info.endpoint + "/request_clear_history"
 
-        headers = {"Content-Type": "application/json"}
-        requests.post(destination, headers=headers, json={"name": self.name})
+        destination = f"{info.endpoint}/request_clear_history"
+        payload = {"name": self.name}
+
+        requests.post(destination, json=payload)
 
     def request_reply_at_receive(self, recipient: Agent, request_reply: bool):
-        destination = self.get_agentinfo_from_name(recipient._name).endpoint + "/request_reply_at_receive"
-        headers = {"Content-Type": "application/json"}
-        requests.post(destination, headers=headers, json={"name": self.name, "request_reply": request_reply})
+        agent_info = self.get_agentinfo_from_name(recipient._name)
+        destination = f"{agent_info.endpoint}/request_reply_at_receive"
+        payload = {"name": self.name, "request_reply": request_reply}
+        requests.post(destination, json=payload)
 
     def request_reset_consecutive_auto_reply_counter(self, recipient: Agent):
         """Send request to reset the consecutive_auto_reply_counter of the receiver with sender"""
         destination = (
             self.get_agentinfo_from_name(recipient._name).endpoint + "/request_reset_consecutive_auto_reply_counter"
         )
-        headers = {"Content-Type": "application/json"}
-        requests.post(destination, headers=headers, json={"name": self._name})
+        requests.post(destination, json={"name": self._name})
 
     def handler(self, message: Message):
         self.receive(
@@ -148,11 +160,9 @@ class StandAloneAgent(ConversableAgent):
 
         params = {"name": agent_name}
         response = requests.get(self._central_server + "/agent", params=params)
-        print("\nGOT ", response.json())
         info = AgentInfo(**response.json())
         if response.status_code == 200:
             self._cache_agentinfo[agent_name] = info
-        print(info)
         return info
 
     def _register_agent(self):
@@ -183,6 +193,7 @@ class StandAloneAgent(ConversableAgent):
 
     def serve(self):
         print(colored(f"{self._name} is {RunningState.ONLINE} at {self._host}:{self._port}", "green"))
+        signal.signal(signal.SIGINT, self.signal_handler)
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.start()
 
@@ -196,15 +207,26 @@ class StandAloneAgent(ConversableAgent):
         self.thread.join()
 
     def send_http_message(self, message: Message, destination: str):
-        headers = {"Content-Type": "application/json"}
-        print(f"Send to {destination}: {message.model_dump_json()}")
-        response = requests.post(destination, headers=headers, json=message.model_dump())
-        print(f"Got response {response.content}")
+        logger.debug(f"Send to {destination}: {message.model_dump_json()}")
+        response = requests.post(destination, json=message.model_dump())
+        logger.debug(f"Response {response.json()}")
         return response.status_code
-    
+
     def wait_for_agent(self, agent_name):
         while True and self.get_agentinfo_from_name(agent_name).status != RunningState.ONLINE:
+            print(colored(f"Waiting for {agent_name}...", color="light_magenta"), flush=True)
             time.sleep(10)
+
+    def signal_handler(self, sig, frame):
+        print(colored(f"Terminating agent", "yellow"), flush=True)
+        self.stop()
+        self.thread.join()
+        sys.exit(0)
+
+    def wait(self):
+        while True:
+            time.sleep(2)
+
     ####################################################################
 
     # def register_reply(
@@ -359,7 +381,6 @@ class StandAloneAgent(ConversableAgent):
                     request_reply=request_reply,
                     silent=silent,
                 )
-                print(colored(f"{self.name} -> {recipient._name}: {message}", "light_red"), flush=True)
                 self.send_http_message(http_message, target_url)
             except Exception as e:
                 raise e
@@ -447,7 +468,7 @@ class StandAloneAgent(ConversableAgent):
         """
         self._process_received_message(message, sender, silent)
         if request_reply is False or request_reply is None and self.reply_at_receive[sender._name] is False:
-            print(colored(f"{self.name} is not gonna reply to {sender._name}", "red"), flush=True)
+            logger.debug(colored(f"{self.name} is not gonna reply to {sender._name}", "red"))
             return
 
         reply = self.generate_reply(messages=self.chat_messages[sender._name], sender=sender)
@@ -586,6 +607,7 @@ class StandAloneAgent(ConversableAgent):
         config: Optional[OpenAIWrapper] = None,
     ) -> Tuple[bool, Union[str, Dict, None]]:
         """Generate a reply using autogen.oai."""
+        logger.debug(colored(f"{self._name} generate_oai_reply", "blue"))
         client = self.client if config is None else config
         if client is None:
             return False, None
@@ -595,19 +617,18 @@ class StandAloneAgent(ConversableAgent):
         # TODO: #1143 handle token limit exceeded error
         ctx = messages[-1].pop("context", None)
         msg = self._oai_system_message + messages
-        print(
+        logger.debug(
             colored(
                 f"{self.name} is using OAI, based on:\n-Context: {ctx}\n-Messages: {json.dumps(msg, indent=4)}",
                 "yellow",
-            ),
-            flush=True,
+            )
         )
         response = client.create(context=ctx, messages=msg)
 
         # TODO: line 301, line 271 is converting messages to dict. Can be removed after ChatCompletionMessage_to_dict is merged.
         extracted_response = client.extract_text_or_completion_object(response)[0]
         if not isinstance(extracted_response, str):
-            extracted_response = extracted_response.model_dump(mode="dict")
+            extracted_response = model_dump(extracted_response)
         return True, extracted_response
 
     async def a_generate_oai_reply(
@@ -617,6 +638,7 @@ class StandAloneAgent(ConversableAgent):
         config: Optional[Any] = None,
     ) -> Tuple[bool, Union[str, Dict, None]]:
         """Generate a reply using autogen.oai asynchronously."""
+        logger.debug(colored(f"{self._name} a_generate_oai_reply", "blue"))
         return await asyncio.get_event_loop().run_in_executor(
             None, functools.partial(self.generate_oai_reply, messages=messages, sender=sender, config=config)
         )
@@ -628,7 +650,7 @@ class StandAloneAgent(ConversableAgent):
         config: Optional[Union[Dict, Literal[False]]] = None,
     ):
         """Generate a reply using code execution."""
-        print(colored(f"generate_code_execution_reply", "blue"), flush=True)
+        print(colored(f"{self._name} generate_code_execution_reply", "blue"))
         code_execution_config = config if config is not None else self._code_execution_config
         if code_execution_config is False:
             return False, None
@@ -678,7 +700,7 @@ class StandAloneAgent(ConversableAgent):
         config: Optional[Any] = None,
     ) -> Tuple[bool, Union[Dict, None]]:
         """Generate a reply using function call."""
-        print(colored(f"generate_function_call_reply", "blue"), flush=True)
+        logger.debug(colored(f"{self._name} generate_function_call_reply", "blue"))
         if config is None:
             config = self
         if messages is None:  #:
@@ -696,6 +718,7 @@ class StandAloneAgent(ConversableAgent):
         config: Optional[Any] = None,
     ) -> Tuple[bool, Union[Dict, None]]:
         """Generate a reply using async function call."""
+        logger.debug(colored(f"{self._name} a_generate_function_call_reply", "blue"))
         if config is None:
             config = self
         if messages is None:  #:
@@ -735,10 +758,10 @@ class StandAloneAgent(ConversableAgent):
             should be terminated, and a human reply which can be a string, a dictionary, or None.
         """
         # Function implementation...
-        print(colored(f"check_termination_and_human_reply", "blue"), flush=True)
+        logger.debug(colored(f"{self._name} check_termination_and_human_reply", "blue"))
         if config is None:
             config = self
-        if messages is None:  #:
+        if messages is None or len(messages) == 0:
             messages = self._oai_messages[sender._name]
         message = messages[-1]
         reply = ""
@@ -826,6 +849,7 @@ class StandAloneAgent(ConversableAgent):
             - Tuple[bool, Union[str, Dict, None]]: A tuple containing a boolean indicating if the conversation
             should be terminated, and a human reply which can be a string, a dictionary, or None.
         """
+        logger.debug(colored(f"{self._name} a_check_termination_and_human_reply", "blue"))
         if config is None:
             config = self
         if messages is None:  #:
@@ -941,6 +965,7 @@ class StandAloneAgent(ConversableAgent):
                 continue
             if self._match_trigger(reply_func_tuple["trigger"], sender):
                 final, reply = reply_func(self, messages=messages, sender=sender, config=reply_func_tuple["config"])
+                logger.debug(colored(f"=> Response:\n- final: {final}\n- reply: {reply}", "blue"))
                 if final:
                     return reply
         return self._default_auto_reply
@@ -1061,53 +1086,3 @@ class StandAloneAgent(ConversableAgent):
     # def register_for_llm
 
     # def register_for_execution
-
-    def signal_handler(self, sig, frame):
-        print(colored(f"Terminating agent", "yellow"), flush=True)
-        self.stop()
-        self.thread.join()
-        sys.exit(0)
-
-    def wait(self):
-        signal.signal(signal.SIGINT, self.signal_handler)
-        while True:
-            time.sleep(2)
-
-
-def load_config(file_path):
-    with open(file_path, "r") as f:
-        config = json.load(f)
-    return config
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Start an agent server.")
-    parser.add_argument("--config", type=str, required=True, help="Path to the configuration file")
-    return parser.parse_args()
-
-
-if __name__ == "__main__":
-    args = parse_args()
-    config = load_config(args.config)
-
-    config_list = config_list_from_json("../../../../OAI_CONFIG_LIST", filter_dict={"model": ["llama-v2"]})
-    config_list_gpt = config_list_from_json(
-        "../../../../OAI_CONFIG_LIST", filter_dict={"model": ["gpt-3.5-turbo-1106"]}
-    )
-    llm_config = {
-        "timeout": 600,
-        "cache_seed": 42,
-        "config_list": config_list,
-    }
-
-    agent = StandAloneAgent(
-        sa_agent_config=config,
-        is_termination_msg=lambda x: x.get("content", "").rstrip().endswith("TERMINATE"),
-        llm_config=llm_config,
-        human_input_mode="NEVER",
-    )
-    agent.serve()
-    if config["name"] == "Bob":
-        receiver = Agent("Anna")
-        agent.send(message=f"Hello beautiful girl!", recipient=receiver, request_reply=True)
-    agent.wait()

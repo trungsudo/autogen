@@ -50,6 +50,8 @@ pm = StandAloneAssistantAgent(
     },
     llm_config=llm_config_local_llma,
 )
-
-pm.serve()
-pm.wait()
+try:
+    pm.serve()
+    pm.wait()
+except:
+    pm.stop()
