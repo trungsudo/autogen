@@ -1,12 +1,11 @@
 import os
 
-from standalone_assistant_agent import StandAloneAssistantAgent
-from standalone_user_proxy_agent import StandAloneUserProxyAgent
+from standalone import StandAloneAssistantAgent
 
 import autogen
 
 config_list = autogen.config_list_from_json(
-    "../../../../OAI_CONFIG_LIST", filter_dict={"model": ["gpt-3.5-turbo-1106"]}
+    "../../../../../OAI_CONFIG_LIST", filter_dict={"model": ["gpt-3.5-turbo-1106"]}
 )
 
 

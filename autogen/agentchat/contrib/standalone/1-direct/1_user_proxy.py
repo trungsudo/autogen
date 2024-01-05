@@ -21,7 +21,7 @@ user_proxy = StandAloneUserProxyAgent(
     name="Boss",
     human_input_mode="NEVER",
     max_consecutive_auto_reply=12,
-    # is_termination_msg=lambda x: x.get("content", "").rstrip().endswith("TERMINATE"),
+    is_termination_msg=lambda x: x.get("content", "").rstrip().endswith("TERMINATE"),
     code_execution_config={
         "work_dir": "coding",
         "use_docker": False,
