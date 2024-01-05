@@ -39,23 +39,17 @@ function_map = {
     "get_resource": get_resource,
 }
 
-llm_config_local_llma = {
-    "config_list": config_list,
-    "temperature": 0.5,
-    "max_retries": 20,
-    "timeout": 300,
-    "functions": functions,
-}
+llm_config_local_llma = {"config_list": config_list, "temperature": 0.5, "max_retries": 20, "timeout": 300}
 
-# create an AssistantAgent named "assistant"
-assistant = StandAloneAssistantAgent(
-    name="Developer",
-    agent_config={
+pm = StandAloneAssistantAgent(
+    name="ProductManager",
+    system_message="Creative in software product ideas.",
+    sa_agent_config={
         "central_server": "http://localhost:8888",
-        "port": 2345,
+        "port": 3333,
     },
     llm_config=llm_config_local_llma,
 )
 
-assistant.serve()
-assistant.wait()
+pm.serve()
+pm.wait()

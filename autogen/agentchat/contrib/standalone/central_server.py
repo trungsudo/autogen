@@ -1,22 +1,29 @@
 from enum import Enum
+from typing import Dict, List, Optional
 
-from flask import Flask, request
+from flask import Flask, jsonify, request
 from pydantic import BaseModel, Field
 
 
-# REGISTERED -> ONLINE -> OFFLINE -> REMOVED
+# TODO:
+# - Authorize the communication, can A talks to B?
+#
+# ONLINE -> OFFLINE -> UNREGISTERED
+# TODO: Allow messages to be queued when OFFLINE?
 class RunningState(str, Enum):
-    REGISTERED = "REGISTERED"
     ONLINE = "ONLINE"
     OFFLINE = "OFFLINE"
-    REMOVED = "REMOVED"
+    UNREGISTERED = "UNREGISTERED"
 
 
 class AgentInfo(BaseModel):
     name: str = Field(..., example="Agent Smith")
     description: str = Field(..., example="Test agent")
     endpoint: str = Field(..., example="http://localhost:1232")
-    status: RunningState = Field(RunningState.REMOVED, example=RunningState.REMOVED)
+    status: RunningState = Field(RunningState.UNREGISTERED, example=RunningState.UNREGISTERED)
+    # TODO: Let's Agent asks Central Server for available funcs
+    functions_can_call: Optional[List[Dict]] = Field(None)
+    functions_can_execute: Optional[List[str]] = Field(None)
 
 
 app = Flask(__name__)
@@ -30,7 +37,18 @@ def get_agent():
     if agent_name in agents:
         return agents[agent_name].model_dump()
     else:
-        return {"error": "Agent not found"}, 404
+        response = AgentInfo(
+            name=agent_name,
+            description="Agent is not registered",
+            endpoint="None",
+            status=RunningState.UNREGISTERED,
+        ).model_dump()
+
+        print(f"RESPONSE: {response}")
+        return (
+            response,
+            404,
+        )
 
 
 @app.route("/register", methods=["POST"])
@@ -51,10 +69,16 @@ def register_agent():
 @app.route("/self_unregister", methods=["POST"])
 def remove_agent():
     name = request.get_json()["name"]
+    unregistered = request.get_json()["unregistered"]
     if name in agents:
-        print(f"REMOVED: {agents[name].name}")
-        agents.pop(name)
-        return {"status": "removed"}, 201
+        if not unregistered:
+            print(f"OFFLINE: {agents[name].name}")
+            agents[name].status = RunningState.OFFLINE
+            return {"status": RunningState.OFFLINE}, 200
+        else:
+            print(f"UNREGISTED: {agents[name].name}")
+            agents.pop(name)
+            return {"status": RunningState.UNREGISTERED}, 200
     return {"error": "Agent not found"}, 404
 
 

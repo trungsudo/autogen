@@ -41,23 +41,29 @@ class Message(BaseModel):
     sender_name: str
     receiver_name: str
     message: Union[Dict, str]
-    request_reply:  Optional[bool] = False
+    request_reply: Optional[bool] = False
     silent: Optional[bool] = False
 
 
+# TODO: 2 modes
+# - With central_server
+# - Proxy to ConversableAgent
 class StandAloneAgent(ConversableAgent):
-    def __init__(self, *args, agent_config: Optional[Dict] = None, **kwargs):
-        if "port" not in agent_config or "central_server" not in agent_config:
-            raise Exception("config is not contains port/central_server")
-        self._port = int(agent_config.get("port", 1234))
-        self._central_server = agent_config["central_server"]
-        self._host = agent_config["host"] if "host" in agent_config else socket.gethostbyname(socket.gethostname())
-        agent_config.pop("port")
-        agent_config.pop("central_server")
-        if "host" in agent_config:
-            agent_config.pop("host")
+    def __init__(self, *args, sa_agent_config: Optional[Dict] = None, **kwargs):
+        if "port" not in sa_agent_config or "central_server" not in sa_agent_config:
+            raise ValueError("config is not contains port/central_server")
+        self._unregistered_when_offline = True
+        self._port = int(sa_agent_config.get("port", 1234))
+        self._central_server = sa_agent_config["central_server"]
+        self._host = (
+            sa_agent_config["host"] if "host" in sa_agent_config else socket.gethostbyname(socket.gethostname())
+        )
+        sa_agent_config.pop("port")
+        sa_agent_config.pop("central_server")
+        if "host" in sa_agent_config:
+            sa_agent_config.pop("host")
 
-        super().__init__(*args, **agent_config, **kwargs)
+        super().__init__(*args, **sa_agent_config, **kwargs)
         # TODO: expiration
         self._cache_agentinfo = {}
         self._register_agent()
@@ -87,7 +93,9 @@ class StandAloneAgent(ConversableAgent):
         def handle_request_reset_consecutive_auto_reply_counter():
             """Reset the consecutive_auto_reply_counter of the sender HTTP handler."""
             data = request.get_json(force=True)
-            self.reset_consecutive_auto_reply_counter(data if data is None or data["name"] is None else Agent(data["name"]))
+            self.reset_consecutive_auto_reply_counter(
+                data if data is None or data["name"] is None else Agent(data["name"])
+            )
             return "Request received", 200
 
         @self.app.route("/request_reply_at_receive", methods=["POST"])
@@ -96,15 +104,20 @@ class StandAloneAgent(ConversableAgent):
             if data is not None and data["name"] is not None and data["request_reply"] is not None:
                 self.reply_at_receive[data["name"]] = data["request_reply"]
             return "Request received", 200
-        
+
         @self.app.route("/request_clear_history", methods=["POST"])
         def handle_request_clear_history():
             data = request.get_json(force=True)
             self.clear_history(data if data is None or data["name"] is None else Agent(data["name"]))
             return "Request received", 200
-        
+
     def request_clear_history(self, recipient: Agent):
-        destination = self.get_agentinfo_from_name(recipient._name).endpoint + "/request_clear_history"
+        info = self.get_agentinfo_from_name(recipient._name)
+        if info.status != RunningState.ONLINE:
+            print(colored(f"{recipient._name} is NOT ONLINE"))
+            return
+        destination = info.endpoint + "/request_clear_history"
+
         headers = {"Content-Type": "application/json"}
         requests.post(destination, headers=headers, json={"name": self.name})
 
@@ -135,35 +148,50 @@ class StandAloneAgent(ConversableAgent):
 
         params = {"name": agent_name}
         response = requests.get(self._central_server + "/agent", params=params)
-
-        if response.status_code != 200:
-            raise Exception(response.json()["error"])
+        print("\nGOT ", response.json())
         info = AgentInfo(**response.json())
-        self._cache_agentinfo[agent_name] = info
+        if response.status_code == 200:
+            self._cache_agentinfo[agent_name] = info
+        print(info)
         return info
 
     def _register_agent(self):
         message = AgentInfo(
-            name=self._name, description=self.system_message, endpoint=f"http://{self._host}:{self._port}"
+            name=self._name,
+            description=self.description,
+            endpoint=f"http://{self._host}:{self._port}",
+            functions_can_call=None
+            if self.llm_config is None or self.llm_config is False or "functions" not in self.llm_config
+            else self.llm_config["functions"],
+            functions_can_execute=self._function_map.keys() if self._function_map is not None else None,
         )
+
         response = requests.post(self._central_server + "/register", json=message.model_dump())
         if response.status_code != 200:
-            raise Exception(response.content)
+            raise ValueError(response.content)
+        print(colored(f"Registered to central server {self._central_server}", "green"), flush=True)
 
     def _self_unregister(self):
-        requests.post(self._central_server + "/self_unregister", json={"name": self._name})
+        response = requests.post(
+            self._central_server + "/self_unregister",
+            json={"name": self._name, "unregistered": self._unregistered_when_offline},
+        )
+        if response.status_code != 200:
+            print(colored(response.content, "yellow"))
+        elif self._unregistered_when_offline:
+            print(colored(f"Unregistered from central server {self._central_server}", "yellow"), flush=True)
 
     def serve(self):
-        print(colored(f"{self._name} is ONLINE at {self._host}:{self._port}", "green"))
+        print(colored(f"{self._name} is {RunningState.ONLINE} at {self._host}:{self._port}", "green"))
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.start()
 
     def stop(self):
         try:
-            response = self._self_unregister()
+            self._self_unregister()
         except Exception as error:
             print(error)
-        print(colored(f"{self._name} is OFFLINE", "red"))
+        print(colored(f"{self._name} is {RunningState.OFFLINE}", "red"))
         self.server.shutdown()
         self.thread.join()
 
@@ -173,7 +201,10 @@ class StandAloneAgent(ConversableAgent):
         response = requests.post(destination, headers=headers, json=message.model_dump())
         print(f"Got response {response.content}")
         return response.status_code
-
+    
+    def wait_for_agent(self, agent_name):
+        while True and self.get_agentinfo_from_name(agent_name).status != RunningState.ONLINE:
+            time.sleep(10)
     ####################################################################
 
     # def register_reply(
@@ -209,9 +240,8 @@ class StandAloneAgent(ConversableAgent):
             self._max_consecutive_auto_reply if sender is None else self._max_consecutive_auto_reply_dict[sender._name]
         )
 
-    # Broken: def chat_messages(self) -> Dict[Agent, List[Dict]]
     @property
-    def chat_messages(self) -> Dict[str, List[Dict]]:
+    def chat_messages(self) -> Dict[Union[str, Agent], List[Dict]]:
         """A dictionary of conversations from agent to list of messages."""
         return self._oai_messages
 
@@ -456,7 +486,7 @@ class StandAloneAgent(ConversableAgent):
 
     def initiate_chat(
         self,
-        recipient: "ConversableAgent",
+        recipient: Union[str, Agent],
         clear_history: Optional[bool] = True,
         silent: Optional[bool] = False,
         **context,
@@ -474,12 +504,19 @@ class StandAloneAgent(ConversableAgent):
             **context: any context information.
                 "message" needs to be provided if the `generate_init_message` method is not overridden.
         """
+        if isinstance(recipient, str):
+            info = self.get_agentinfo_from_name(recipient)
+            if info.status != RunningState.ONLINE:
+                print(colored(f"{recipient} is {info.status}"))
+                return
+            recipient = Agent(recipient)
+
         self._prepare_chat(recipient, clear_history)
         self.send(self.generate_init_message(**context), recipient, silent=silent)
 
     async def a_initiate_chat(
         self,
-        recipient: "ConversableAgent",
+        recipient: Union[str, Agent],
         clear_history: Optional[bool] = True,
         silent: Optional[bool] = False,
         **context,
@@ -497,6 +534,12 @@ class StandAloneAgent(ConversableAgent):
             **context: any context information.
                 "message" needs to be provided if the `generate_init_message` method is not overridden.
         """
+        if isinstance(recipient, str):
+            info = self.get_agentinfo_from_name(recipient)
+            if info.status != RunningState.ONLINE:
+                print(colored(f"{recipient} is {info.status}"))
+                return
+            recipient = Agent(recipient)
         self._prepare_chat(recipient, clear_history)
         await self.a_send(self.generate_init_message(**context), recipient, silent=silent)
 
@@ -546,7 +589,7 @@ class StandAloneAgent(ConversableAgent):
         client = self.client if config is None else config
         if client is None:
             return False, None
-        if messages is None or len(messages) == 0:
+        if messages is None:  #:
             messages = self._oai_messages[sender._name]
 
         # TODO: #1143 handle token limit exceeded error
@@ -638,7 +681,7 @@ class StandAloneAgent(ConversableAgent):
         print(colored(f"generate_function_call_reply", "blue"), flush=True)
         if config is None:
             config = self
-        if messages is None or len(messages) == 0:
+        if messages is None:  #:
             messages = self._oai_messages[sender._name]
         message = messages[-1]
         if "function_call" in message:
@@ -655,7 +698,7 @@ class StandAloneAgent(ConversableAgent):
         """Generate a reply using async function call."""
         if config is None:
             config = self
-        if messages is None or len(messages) == 0:
+        if messages is None:  #:
             messages = self._oai_messages[sender._name]
         message = messages[-1]
         if "function_call" in message:
@@ -695,7 +738,7 @@ class StandAloneAgent(ConversableAgent):
         print(colored(f"check_termination_and_human_reply", "blue"), flush=True)
         if config is None:
             config = self
-        if messages is None or len(messages) == 0:
+        if messages is None:  #:
             messages = self._oai_messages[sender._name]
         message = messages[-1]
         reply = ""
@@ -708,7 +751,10 @@ class StandAloneAgent(ConversableAgent):
             # if the human input is empty, and the message is a termination message, then we will terminate the conversation
             reply = reply if reply or not self._is_termination_msg(message) else "exit"
         else:
-            if self._consecutive_auto_reply_counter[sender._name] >= self._max_consecutive_auto_reply_dict[sender._name]:
+            if (
+                self._consecutive_auto_reply_counter[sender._name]
+                >= self._max_consecutive_auto_reply_dict[sender._name]
+            ):
                 if self.human_input_mode == "NEVER":
                     reply = "exit"
                 else:
@@ -782,7 +828,7 @@ class StandAloneAgent(ConversableAgent):
         """
         if config is None:
             config = self
-        if messages is None or len(messages) == 0:
+        if messages is None:  #:
             messages = self._oai_messages[sender._name]
         message = messages[-1]
         reply = ""
@@ -795,7 +841,10 @@ class StandAloneAgent(ConversableAgent):
             # if the human input is empty, and the message is a termination message, then we will terminate the conversation
             reply = reply if reply or not self._is_termination_msg(message) else "exit"
         else:
-            if self._consecutive_auto_reply_counter[sender._name] >= self._max_consecutive_auto_reply_dict[sender._name]:
+            if (
+                self._consecutive_auto_reply_counter[sender._name]
+                >= self._max_consecutive_auto_reply_dict[sender._name]
+            ):
                 if self.human_input_mode == "NEVER":
                     reply = "exit"
                 else:
@@ -1014,15 +1063,16 @@ class StandAloneAgent(ConversableAgent):
     # def register_for_execution
 
     def signal_handler(self, sig, frame):
-        print("Terminating agent")
+        print(colored(f"Terminating agent", "yellow"), flush=True)
         self.stop()
+        self.thread.join()
         sys.exit(0)
 
     def wait(self):
         signal.signal(signal.SIGINT, self.signal_handler)
         while True:
             time.sleep(2)
-        # self.thread.join()
+
 
 def load_config(file_path):
     with open(file_path, "r") as f:
@@ -1035,8 +1085,8 @@ def parse_args():
     parser.add_argument("--config", type=str, required=True, help="Path to the configuration file")
     return parser.parse_args()
 
+
 if __name__ == "__main__":
-    
     args = parse_args()
     config = load_config(args.config)
 
@@ -1051,7 +1101,7 @@ if __name__ == "__main__":
     }
 
     agent = StandAloneAgent(
-        agent_config=config,
+        sa_agent_config=config,
         is_termination_msg=lambda x: x.get("content", "").rstrip().endswith("TERMINATE"),
         llm_config=llm_config,
         human_input_mode="NEVER",
@@ -1061,4 +1111,3 @@ if __name__ == "__main__":
         receiver = Agent("Anna")
         agent.send(message=f"Hello beautiful girl!", recipient=receiver, request_reply=True)
     agent.wait()
-    
