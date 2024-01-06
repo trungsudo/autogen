@@ -1,13 +1,16 @@
 import os
 
-from standalone_assistant_agent import StandAloneAssistantAgent
-from standalone_user_proxy_agent import StandAloneUserProxyAgent
+from termcolor import colored
 
 import autogen
-
-config_list = autogen.config_list_from_json(
-    "../../../../OAI_CONFIG_LIST", filter_dict={"model": ["gpt-3.5-turbo-1106"]}
+from autogen.autogen.agentchat.contrib.independent_agent.i_assistant_agent import (
+    IndependentAssistantAgent,
 )
+from autogen.autogen.agentchat.contrib.independent_agent.i_user_proxy_agent import (
+    IndependentUserProxyAgent,
+)
+
+config_list = autogen.config_list_from_json("../../../../OAI_CONFIG_LIST", filter_dict={"model": ["llama-v2"]})
 
 
 def get_resource(description, save_path) -> str:
@@ -41,9 +44,9 @@ function_map = {
 
 llm_config_local_llma = {"config_list": config_list, "temperature": 0.5, "max_retries": 20, "timeout": 300}
 
-pm = StandAloneAssistantAgent(
+pm = IndependentAssistantAgent(
     name="ProductManager",
-    system_message="Creative in software product ideas.",
+    system_message="Creative in software product ideas. You make detail plan for coder to implement. Do not fix error in future.",
     sa_agent_config={
         "central_server": "http://localhost:8888",
         "port": 3333,
@@ -52,6 +55,7 @@ pm = StandAloneAssistantAgent(
 )
 try:
     pm.serve()
-    pm.wait()
-except:
+    pm.main_loop()
+except Exception as error:
+    print(colored(error, "red"), flush=True)
     pm.stop()

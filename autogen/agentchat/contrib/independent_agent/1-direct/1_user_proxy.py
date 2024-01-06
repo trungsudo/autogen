@@ -1,6 +1,6 @@
 import os
 
-from standalone import StandAloneUserProxyAgent
+from independent_agent import IndependentUserProxyAgent
 
 import autogen
 from autogen import ConversableAgent
@@ -17,9 +17,9 @@ def get_resource(description, save_path) -> str:
 function_map = {"get_resource": get_resource}
 
 # create a UserProxyAgent instance named "user_proxy"
-user_proxy = StandAloneUserProxyAgent(
+user_proxy = IndependentUserProxyAgent(
     name="Boss",
-    human_input_mode="NEVER",
+    human_input_mode="ALWAYS",
     max_consecutive_auto_reply=12,
     is_termination_msg=lambda x: x.get("content", "").rstrip().endswith("TERMINATE"),
     code_execution_config={
@@ -49,7 +49,7 @@ try:
         message="""Plot a chart of their stock price change YTD and save to stock_price_ytd.png.""",
     )
 
-    user_proxy.wait()
+    user_proxy.main_loop()
 except Exception as error:
     print(error)
     user_proxy.stop()

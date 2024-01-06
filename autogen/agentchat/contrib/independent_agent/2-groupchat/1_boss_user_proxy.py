@@ -1,12 +1,16 @@
 import os
 import time
 
-from standalone_assistant_agent import StandAloneAssistantAgent
-from standalone_user_proxy_agent import StandAloneUserProxyAgent
 from termcolor import colored
 
 import autogen
 from autogen import ConversableAgent
+from autogen.autogen.agentchat.contrib.independent_agent.i_assistant_agent import (
+    IndependentAssistantAgent,
+)
+from autogen.autogen.agentchat.contrib.independent_agent.i_user_proxy_agent import (
+    IndependentUserProxyAgent,
+)
 
 
 def get_resource(description, save_path) -> str:
@@ -19,10 +23,9 @@ def get_resource(description, save_path) -> str:
 
 function_map = {"get_resource": get_resource}
 
-# create a UserProxyAgent instance named "user_proxy"
-user_proxy = StandAloneUserProxyAgent(
+user_proxy = IndependentUserProxyAgent(
     name="Boss",
-    human_input_mode="TERMINATE",
+    human_input_mode="ALWAYS",
     max_consecutive_auto_reply=12,
     is_termination_msg=lambda x: x.get("content", "").rstrip().endswith("TERMINATE"),
     code_execution_config={
@@ -42,13 +45,17 @@ try:
     user_proxy.serve()
     # TODO: Get notification from server
     user_proxy.wait_for_agent("ChatManager")
-
+    print("Send request to ChatManager")
     user_proxy.initiate_chat(
         recipient="ChatManager",
         clear_history=True,
-        message="""create a battleship classic game""",
+        message="""create a GUI classic game. python code is provided in a python code block: 
+        ```python
+        ...
+        ```
+        """,
     )
-    user_proxy.wait()
+    user_proxy.main_loop()
 except Exception as error:
     print(colored(error, "red"), flush=True)
     user_proxy.stop()

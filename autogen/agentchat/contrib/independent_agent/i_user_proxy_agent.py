@@ -1,9 +1,9 @@
 from typing import Callable, Dict, List, Literal, Optional, Union
 
-from standalone_agent import StandAloneAgent
+from autogen.autogen.agentchat.contrib.independent_agent.i_agent import IndependentAgent
 
 
-class StandAloneUserProxyAgent(StandAloneAgent):
+class IndependentUserProxyAgent(IndependentAgent):
     """(In preview) A proxy agent for the user, that can execute code and provide feedback to the other agents.
 
     UserProxyAgent is a subclass of ConversableAgent configured with `human_input_mode` to ALWAYS

@@ -32,12 +32,12 @@ from werkzeug.serving import make_server
 
 from autogen import Agent, ConversableAgent, config_list_from_json
 from autogen._pydantic import model_dump
-from autogen.code_utils import UNKNOWN, extract_code
+from autogen.code_utils import UNKNOWN, content_str, extract_code
 from autogen.oai import OpenAIWrapper
 
 logger = logging.getLogger(__name__)
-
-logger.setLevel(logging.INFO)
+log = logging.getLogger("werkzeug")
+log.disabled = True
 
 
 class Message(BaseModel):
@@ -51,7 +51,7 @@ class Message(BaseModel):
 # TODO: 2 modes
 # - With central_server
 # - Proxy to ConversableAgent
-class StandAloneAgent(ConversableAgent):
+class IndependentAgent(ConversableAgent):
     def __init__(self, *args, sa_agent_config: Optional[Dict] = None, **kwargs):
         if "port" not in sa_agent_config or "central_server" not in sa_agent_config:
             raise ValueError("config is not contains port/central_server")
@@ -73,13 +73,13 @@ class StandAloneAgent(ConversableAgent):
 
         # Re-register all the reply funcs
         self._reply_func_list = []
-        self.register_reply([Agent, None], StandAloneAgent.generate_oai_reply)
-        self.register_reply([Agent, None], StandAloneAgent.a_generate_oai_reply)
-        self.register_reply([Agent, None], StandAloneAgent.generate_code_execution_reply)
-        self.register_reply([Agent, None], StandAloneAgent.generate_function_call_reply)
-        self.register_reply([Agent, None], StandAloneAgent.a_generate_function_call_reply)
-        self.register_reply([Agent, None], StandAloneAgent.check_termination_and_human_reply)
-        self.register_reply([Agent, None], StandAloneAgent.a_check_termination_and_human_reply)
+        self.register_reply([Agent, None], IndependentAgent.generate_oai_reply)
+        self.register_reply([Agent, None], IndependentAgent.a_generate_oai_reply)
+        self.register_reply([Agent, None], IndependentAgent.generate_code_execution_reply)
+        self.register_reply([Agent, None], IndependentAgent.generate_function_call_reply)
+        self.register_reply([Agent, None], IndependentAgent.a_generate_function_call_reply)
+        self.register_reply([Agent, None], IndependentAgent.check_termination_and_human_reply)
+        self.register_reply([Agent, None], IndependentAgent.a_check_termination_and_human_reply)
 
         self.app = Flask(__name__)
         self.server = make_server(self._host, self._port, self.app)
@@ -119,7 +119,10 @@ class StandAloneAgent(ConversableAgent):
             data = request.get_json(force=True)
             if data is None or "reply_to" not in data:
                 return jsonify("bad request"), 400
-            reply = self.generate_reply(sender=Agent(data["reply_to"]))
+            agent_to_reply = Agent(data["reply_to"])
+            print(colored(f"{self._name} is requested to reply to {agent_to_reply._name}"))
+            reply = self.generate_reply(sender=agent_to_reply)
+            self.print_send_message(reply, agent_to_reply)
             return jsonify(reply), 200
 
     def request_clear_history(self, recipient: Agent):
@@ -220,10 +223,10 @@ class StandAloneAgent(ConversableAgent):
     def signal_handler(self, sig, frame):
         print(colored(f"Terminating agent", "yellow"), flush=True)
         self.stop()
-        self.thread.join()
         sys.exit(0)
 
-    def wait(self):
+    # A loop for keyboard events
+    def main_loop(self):
         while True:
             time.sleep(2)
 
@@ -381,6 +384,7 @@ class StandAloneAgent(ConversableAgent):
                     request_reply=request_reply,
                     silent=silent,
                 )
+                logger.debug(colored(f"{self._name} -> {recipient._name}: {message}", "blue"))
                 self.send_http_message(http_message, target_url)
             except Exception as e:
                 raise e
@@ -466,9 +470,10 @@ class StandAloneAgent(ConversableAgent):
         Raises:
             ValueError: if the message can't be converted into a valid ChatCompletion message.
         """
+        silent = False
         self._process_received_message(message, sender, silent)
         if request_reply is False or request_reply is None and self.reply_at_receive[sender._name] is False:
-            logger.debug(colored(f"{self.name} is not gonna reply to {sender._name}", "red"))
+            print(colored(f"{self.name} is not gonna reply to {sender._name}", "red"), flush=True)
             return
 
         reply = self.generate_reply(messages=self.chat_messages[sender._name], sender=sender)
@@ -478,6 +483,8 @@ class StandAloneAgent(ConversableAgent):
             except Exception as e:
                 print(e)
                 return
+            self._print_received_message(message, sender)
+            self._print_received_message(reply, self)
             self.send(message=reply, recipient=sender, request_reply=True, silent=silent)
         else:
             print(colored(f"{self.name} has nothing to tell with {sender._name}", "red"), flush=True)
@@ -607,7 +614,7 @@ class StandAloneAgent(ConversableAgent):
         config: Optional[OpenAIWrapper] = None,
     ) -> Tuple[bool, Union[str, Dict, None]]:
         """Generate a reply using autogen.oai."""
-        logger.debug(colored(f"{self._name} generate_oai_reply", "blue"))
+        print(colored(f"{self._name} generate_oai_reply", "blue"))
         client = self.client if config is None else config
         if client is None:
             return False, None
@@ -638,7 +645,7 @@ class StandAloneAgent(ConversableAgent):
         config: Optional[Any] = None,
     ) -> Tuple[bool, Union[str, Dict, None]]:
         """Generate a reply using autogen.oai asynchronously."""
-        logger.debug(colored(f"{self._name} a_generate_oai_reply", "blue"))
+        print(colored(f"{self._name} a_generate_oai_reply", "blue"))
         return await asyncio.get_event_loop().run_in_executor(
             None, functools.partial(self.generate_oai_reply, messages=messages, sender=sender, config=config)
         )
@@ -700,7 +707,7 @@ class StandAloneAgent(ConversableAgent):
         config: Optional[Any] = None,
     ) -> Tuple[bool, Union[Dict, None]]:
         """Generate a reply using function call."""
-        logger.debug(colored(f"{self._name} generate_function_call_reply", "blue"))
+        print(colored(f"{self._name} generate_function_call_reply", "blue"))
         if config is None:
             config = self
         if messages is None:  #:
@@ -718,7 +725,7 @@ class StandAloneAgent(ConversableAgent):
         config: Optional[Any] = None,
     ) -> Tuple[bool, Union[Dict, None]]:
         """Generate a reply using async function call."""
-        logger.debug(colored(f"{self._name} a_generate_function_call_reply", "blue"))
+        print(colored(f"{self._name} a_generate_function_call_reply", "blue"))
         if config is None:
             config = self
         if messages is None:  #:
@@ -758,7 +765,7 @@ class StandAloneAgent(ConversableAgent):
             should be terminated, and a human reply which can be a string, a dictionary, or None.
         """
         # Function implementation...
-        logger.debug(colored(f"{self._name} check_termination_and_human_reply", "blue"))
+        print(colored(f"{self._name} check_termination_and_human_reply", "blue"))
         if config is None:
             config = self
         if messages is None or len(messages) == 0:
@@ -849,7 +856,7 @@ class StandAloneAgent(ConversableAgent):
             - Tuple[bool, Union[str, Dict, None]]: A tuple containing a boolean indicating if the conversation
             should be terminated, and a human reply which can be a string, a dictionary, or None.
         """
-        logger.debug(colored(f"{self._name} a_check_termination_and_human_reply", "blue"))
+        print(colored(f"{self._name} a_check_termination_and_human_reply", "blue"))
         if config is None:
             config = self
         if messages is None:  #:
@@ -948,7 +955,7 @@ class StandAloneAgent(ConversableAgent):
         Returns:
             str or dict or None: reply. None if no reply is generated.
         """
-        print(colored(f"{self._name} generate_reply", "blue"), flush=True)
+        print(colored(f"{self._name} generate_reply", "blue"))
         if all((messages is None, sender is None)):
             error_msg = f"Either {messages=} or {sender=} must be provided."
             logger.error(error_msg)
@@ -1086,3 +1093,40 @@ class StandAloneAgent(ConversableAgent):
     # def register_for_llm
 
     # def register_for_execution
+
+    #############################################################################
+
+    def print_send_message(self, message: Union[Dict, str], received: Agent):
+        # print the message received
+        print(colored(self._name, "yellow"), "(to", f"{received._name}):\n", flush=True)
+        message = self._message_to_dict(message)
+
+        if message.get("role") == "function":
+            func_print = f"***** Response from calling function \"{message['name']}\" *****"
+            print(colored(func_print, "green"), flush=True)
+            print(message["content"], flush=True)
+            print(colored("*" * len(func_print), "green"), flush=True)
+        else:
+            content = message.get("content")
+            if content is not None:
+                if "context" in message:
+                    content = OpenAIWrapper.instantiate(
+                        content,
+                        message["context"],
+                        self.llm_config and self.llm_config.get("allow_format_str_template", False),
+                    )
+                print(content_str(content), flush=True)
+            if "function_call" in message:
+                function_call = dict(message["function_call"])
+                func_print = (
+                    f"***** Suggested function Call: {function_call.get('name', '(No function name found)')} *****"
+                )
+                print(colored(func_print, "green"), flush=True)
+                print(
+                    "Arguments: \n",
+                    function_call.get("arguments", "(No arguments found)"),
+                    flush=True,
+                    sep="",
+                )
+                print(colored("*" * len(func_print), "green"), flush=True)
+        print("\n", "-" * 80, flush=True, sep="")

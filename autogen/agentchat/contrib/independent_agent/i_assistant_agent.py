@@ -1,9 +1,9 @@
 from typing import Callable, Dict, Literal, Optional, Union
 
-from standalone_agent import StandAloneAgent
+from autogen.autogen.agentchat.contrib.independent_agent.i_agent import IndependentAgent
 
 
-class StandAloneAssistantAgent(StandAloneAgent):
+class IndependentAssistantAgent(IndependentAgent):
     """(In preview) Assistant agent, designed to solve a task with LLM.
 
     AssistantAgent is a subclass of ConversableAgent configured with a default system message.

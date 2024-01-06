@@ -1,12 +1,14 @@
 import os
 
-from standalone import StandAloneAssistantAgent
+from termcolor import colored
 
 import autogen
-
-config_list = autogen.config_list_from_json(
-    "../../../../../OAI_CONFIG_LIST", filter_dict={"model": ["gpt-3.5-turbo-1106"]}
+from autogen.autogen.agentchat.contrib.independent_agent.i_assistant_agent import (
+    IndependentAssistantAgent,
 )
+
+config_list = autogen.config_list_from_json("../../../../OAI_CONFIG_LIST", filter_dict={"model": ["llama-v2"]})
+# config_list = autogen.config_list_from_json("autogen/OAI_CONFIG_LIST", filter_dict={"model": ["gpt-3.5-turbo-1106"]})
 
 
 def get_resource(description, save_path) -> str:
@@ -43,18 +45,21 @@ llm_config_local_llma = {
     "temperature": 0.5,
     "max_retries": 20,
     "timeout": 300,
-    "functions": functions,
+    # "functions": functions,
 }
 
-# create an AssistantAgent named "assistant"
-assistant = StandAloneAssistantAgent(
-    name="Developer",
+
+dev = IndependentAssistantAgent(
+    name="Coder",
     sa_agent_config={
         "central_server": "http://localhost:8888",
-        "port": 2345,
+        "port": 2222,
     },
     llm_config=llm_config_local_llma,
 )
-
-assistant.serve()
-assistant.wait()
+try:
+    dev.serve()
+    dev.main_loop()
+except Exception as error:
+    print(colored(error, "red"), flush=True)
+    dev.stop()
